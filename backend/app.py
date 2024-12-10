@@ -3,13 +3,17 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import yfinance as yf
+from flask_cors import CORS
+from scipy.optimize import minimize
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 @app.route('/recommend', methods=['POST'])
 def recommend():
     data = request.json
     symbols = data.get('symbols', [])
+    target_return = data.get('target_return', None)  # User-defined target return
     start_date = data.get('start_date', '2022-01-01')
     end_date = data.get('end_date', datetime.today().strftime('%Y-%m-%d'))
 
@@ -19,42 +23,71 @@ def recommend():
     stock_data = {}
     for symbol in symbols:
         try:
-            stock_data[symbol] = yf.download(symbol, start=start_date, end=end_date)['Adj Close']
+            stock_df = yf.download(symbol, start=start_date, end=end_date)['Adj Close'].squeeze()
+            if stock_df.empty:
+                print(f"Warning: No data or invalid format for {symbol}")
+                continue
+            stock_data[symbol] = stock_df
         except Exception as e:
-            return jsonify({"error": f"Error fetching data for {symbol}: {str(e)}"}), 500
+            print(f"Error fetching data for {symbol}: {e}")
+            continue
+
+    if not stock_data:
+        return jsonify({"error": "No valid stock data found"}), 400
 
     df = pd.DataFrame(stock_data)
+
+    if df.empty:
+        return jsonify({"error": "No usable data to analyze after cleaning"}), 400
+
+    # Calculate returns
     returns = df.pct_change().dropna()
 
-    mean_returns = returns.mean()
-    cov_matrix = returns.cov()
+    if returns.empty:
+        return jsonify({"error": "No returns data available. Ensure stocks have sufficient data."}), 400
 
-    num_assets = len(symbols)
-    num_portfolios = 10000
-    results = np.zeros((3, num_portfolios))
-    weights_record = []
+    mean_returns = returns.mean().to_numpy()
+    cov_matrix = returns.cov().to_numpy()
+    num_assets = len(mean_returns)
 
-    for i in range(num_portfolios):
-        weights = np.random.random(num_assets)
-        weights /= np.sum(weights)
-        weights_record.append(weights)
+    # Objective function: Portfolio variance
+    def portfolio_variance(weights):
+        return np.dot(weights.T, np.dot(cov_matrix, weights))
 
-        portfolio_return = np.dot(weights, mean_returns)
-        portfolio_stddev = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+    # Constraints
+    constraints = [{'type': 'eq', 'fun': lambda w: np.sum(w) - 1}]  # Sum of weights = 1
+    if target_return:
+        constraints.append({'type': 'eq', 'fun': lambda w: np.dot(w, mean_returns) - target_return})
 
-        results[0, i] = portfolio_return
-        results[1, i] = portfolio_stddev
-        results[2, i] = portfolio_return / portfolio_stddev
+    # Bounds: weights between 0 and 1
+    bounds = [(0, 1) for _ in range(num_assets)]
 
-    max_sharpe_idx = np.argmax(results[2])
-    max_sharpe_allocation = weights_record[max_sharpe_idx]
+    # Initial guess: Equal weights
+    initial_weights = np.ones(num_assets) / num_assets
 
-    allocation = {symbol: round(weight, 2) for symbol, weight in zip(symbols, max_sharpe_allocation)}
+    # Optimize
+    result = minimize(
+        portfolio_variance,
+        initial_weights,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=constraints
+    )
+
+    if not result.success:
+        return jsonify({"error": "Optimization failed", "message": result.message}), 400
+
+    optimal_weights = result.x
+    expected_return = np.dot(optimal_weights, mean_returns)
+    volatility = np.sqrt(result.fun)  # Portfolio variance is minimized, sqrt to get stddev
+    sharpe_ratio = expected_return / volatility
+
+    allocation = {symbol: round(weight, 2) for symbol, weight in zip(symbols, optimal_weights)}
 
     return jsonify({
-        "expected_return": round(results[0, max_sharpe_idx], 4),
-        "volatility": round(results[1, max_sharpe_idx], 4),
-        "sharpe_ratio": round(results[2, max_sharpe_idx], 4),
+        "expected_return": round(expected_return, 4),
+        "volatility": round(volatility, 4),
+        "sharpe_ratio": round(sharpe_ratio, 4),
         "allocation": allocation
     })
 
