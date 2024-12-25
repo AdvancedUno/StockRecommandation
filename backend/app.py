@@ -7,13 +7,13 @@ from flask_cors import CORS
 from scipy.optimize import minimize
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)  
 
 @app.route('/recommend', methods=['POST'])
 def recommend():
     data = request.json
     symbols = data.get('symbols', [])
-    target_return = data.get('target_return', None)  # User-defined target return
+    target_return = data.get('target_return', None) 
     start_date = data.get('start_date', '2022-01-01')
     end_date = data.get('end_date', datetime.today().strftime('%Y-%m-%d'))
 
@@ -79,7 +79,7 @@ def recommend():
 
     optimal_weights = result.x
     expected_return = np.dot(optimal_weights, mean_returns)
-    volatility = np.sqrt(result.fun)  # Portfolio variance is minimized, sqrt to get stddev
+    volatility = np.sqrt(result.fun)
     sharpe_ratio = expected_return / volatility
 
     allocation = {symbol: round(weight, 2) for symbol, weight in zip(symbols, optimal_weights)}
